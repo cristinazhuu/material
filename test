@@ -14,8 +14,8 @@ lsm_path = exp_path/'lsm_data'
 
 spec = []
 all_spec = []
-
-
+spectra = []
+filename = []
 
 
 def create_gif(data, dim_index, filename):
@@ -47,6 +47,10 @@ for ext in ('lsm', 'tiff'):
         ############ FILE PATH NAME SPLITTING #############
         name_parts = file_path.stem.split('_')
 
+        plate = name_parts[0]
+        location = name_parts[1]
+        interface =  name_parts[2]
+        name = plate + location + interface
         ## These variables should line up with the naming scheme of the LSM files
         ## when separated by underscores.
         try:
@@ -74,22 +78,11 @@ for ext in ('lsm', 'tiff'):
         # remove the brightfield if it exists
         print(raw_arr)
 
+
         for t in range(raw_arr.shape[0]):
             sepc = np.sum(raw_arr[t, :32, ...], axis=(1, 2))
             all_spec.append(sepc)
+            filename.append(name)
 
-for i in range(raw_arr.shape[0]):
-    print(i)
-    fig = plt.figure()
-    x = 405 + CHANNEL_VEC * 8.9
-    plt.plot(x, all_spec[i])
-    plt.xlim(620, 700)
-    plt.xlabel('Wavelength in nm')
-    plt.ylabel('Photon Count')
-    plt.title('Spectral')
-    plt.draw()
-    plt.pause(1)
-    print(all_spec[i])
-
-plt.show()
-
+df = pd.DataFrame(all_spec)
+df['filepath'] = filename
