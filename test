@@ -4,11 +4,42 @@ import imageio
 import tifffile
 from pathlib import Path
 from matplotlib import pyplot as plt
+import pandas as pd
 
 CHANNEL_VEC = np.arange(0, 32)
 data_path = Path('/Users/cristinazhu/Material/Material')
 exp_path  = data_path/'Data'
 lsm_path = exp_path/'lsm_data'
+
+
+spec = []
+all_spec = []
+
+
+
+
+def create_gif(data, dim_index, filename):
+    images = []
+    for t in range(data.shape[0]):
+        fig, ax = plt.subplots()
+        ax.imshow(data[t, dim_index], cmap='gray')
+        ax.set_title(f'Time: {t}, Dimension: {dim_index}')
+        plt.axis('off')
+
+        # Save the plot to a temporary file
+        temp_filename = f'temp_{t}.png'
+        plt.savefig(temp_filename)
+        plt.close(fig)
+
+        # Read the image and append to the list
+        images.append(imageio.imread(temp_filename))
+
+    # Create the GIF
+    imageio.mimsave(filename, images, fps=2)  # Adjust the fps as needed
+
+# Create GIFs for the first 32 dimensions
+
+
 
 for ext in ('lsm', 'tiff'):
     print(lsm_path.glob(f'*.{ext}'))
@@ -42,12 +73,20 @@ for ext in ('lsm', 'tiff'):
         raw_arr = tifffile.imread(file_path)
         # remove the brightfield if it exists
         print(raw_arr)
-        if raw_arr.shape[0] == 33:
-            channels, brightfield = raw_arr[CHANNEL_VEC], raw_arr[-1]
-        else:
-            channels = raw_arr[CHANNEL_VEC]
-            brightfield = np.zeros(raw_arr.shape[1:3])
+
+        for t in range(raw_arr.shape[0]):
+            sepc = np.sum(raw_arr[t, :32, ...], axis=(1, 2))
+            all_spec.append(sepc)
 
 
+for i in range(raw_arr.shape[0]):
+    print(i)
+    x = 405 + CHANNEL_VEC*8.9
+    plt.plot(x, all_spec[t])
+    plt.xlabel('wavelength in nm')
+    plt.ylabel('Photon Count')
+    plt.title('Spectral')
+    plt.pause(5)
 
+plt.show()
 
