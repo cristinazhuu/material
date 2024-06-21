@@ -1,0 +1,53 @@
+import numpy as np
+from matplotlib.animation import FuncAnimation
+import imageio
+import tifffile
+from pathlib import Path
+from matplotlib import pyplot as plt
+
+CHANNEL_VEC = np.arange(0, 32)
+data_path = Path('/Users/cristinazhu/Material/Material')
+exp_path  = data_path/'Data'
+lsm_path = exp_path/'lsm_data'
+
+for ext in ('lsm', 'tiff'):
+    print(lsm_path.glob(f'*.{ext}'))
+    for file_path in lsm_path.glob(f'*.{ext}'):
+        ############ FILE PATH NAME SPLITTING #############
+        name_parts = file_path.stem.split('_')
+
+        ## These variables should line up with the naming scheme of the LSM files
+        ## when separated by underscores.
+        try:
+            treatment, *other_parts = name_parts
+            cell_type = None
+        except:
+            cell_type = name_parts[0]
+            treatment = 'NO_TREATMENT'
+            other_parts = []
+        if len(other_parts) > 0:
+            tile_id = other_parts[-1]
+        else:
+            tile_id = 0
+
+        ############### FILE PATH FILTER #################
+
+        if tile_id == 'all':
+            continue
+
+        ############### READING AND UNMIXING #############
+        print(file_path.stem)
+
+        # get raw lsm data
+        raw_arr = tifffile.imread(file_path)
+        # remove the brightfield if it exists
+        print(raw_arr)
+        if raw_arr.shape[0] == 33:
+            channels, brightfield = raw_arr[CHANNEL_VEC], raw_arr[-1]
+        else:
+            channels = raw_arr[CHANNEL_VEC]
+            brightfield = np.zeros(raw_arr.shape[1:3])
+
+
+
+
