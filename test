@@ -78,15 +78,18 @@ for ext in ('lsm', 'tiff'):
             sepc = np.sum(raw_arr[t, :32, ...], axis=(1, 2))
             all_spec.append(sepc)
 
-
 for i in range(raw_arr.shape[0]):
     print(i)
-    x = 405 + CHANNEL_VEC*8.9
-    plt.plot(x, all_spec[t])
-    plt.xlabel('wavelength in nm')
+    fig = plt.figure()
+    x = 405 + CHANNEL_VEC * 8.9
+    plt.plot(x, all_spec[i])
+    plt.xlim(620, 700)
+    plt.xlabel('Wavelength in nm')
     plt.ylabel('Photon Count')
     plt.title('Spectral')
-    plt.pause(5)
+    plt.draw()
+    plt.pause(1)
+    print(all_spec[i])
 
 plt.show()
 
