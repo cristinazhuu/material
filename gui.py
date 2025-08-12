@@ -1,4 +1,3 @@
-
 # gui.py
 import sys
 from pathlib import Path
@@ -17,6 +16,20 @@ import pandas as pd
 # your processing module
 import pipeline
 
+
+def _to_uint8(img):
+    """Utility: scale float/uint images to uint8 for PNGs."""
+    arr = np.asarray(img)
+    if arr.dtype == np.uint8:
+        return arr
+    # robust percentile scaling
+    lo, hi = np.percentile(arr, 1), np.percentile(arr, 99.5)
+    if hi <= lo:
+        hi = lo + 1e-6
+    arr = np.clip((arr - lo) / (hi - lo), 0, 1)
+    return (arr * 255).astype(np.uint8)
+
+
 class PhasorGUI(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -26,6 +39,8 @@ class PhasorGUI(QMainWindow):
         self.channels = None
         self.int_img = None
         self.ax_select = self.ax_phasor_sel = self.ax_sum_sel = None
+        self.current_outdir = None
+        self.sel_idx = 0
         self._build_ui()
         self._load_defaults()
 
@@ -63,6 +78,11 @@ class PhasorGUI(QMainWindow):
         self.chk_select = QCheckBox("Interactive Selection")
         ctrl.addWidget(self.chk_select)
 
+        # NEW: always save outputs
+        self.chk_autosave = QCheckBox("Auto-save outputs")
+        self.chk_autosave.setChecked(True)
+        ctrl.addWidget(self.chk_autosave)
+
         btn_run = QPushButton("Run on Selected File")
         btn_run.clicked.connect(self._on_run)
         ctrl.addWidget(btn_run)
@@ -91,6 +111,49 @@ class PhasorGUI(QMainWindow):
             for f in files:
                 self.file_list.addItem(Path(f).name)
 
+    def _prepare_outdir(self, filepath: Path) -> Path:
+        outdir = filepath.parent / f"{filepath.stem}_outputs"
+        outdir.mkdir(exist_ok=True, parents=True)
+        return outdir
+
+    def _save_overview(self, outdir: Path, tag="overview"):
+        fig = self.canvas.figure
+        fig.savefig(outdir / f"{tag}.png", dpi=200, bbox_inches='tight')
+
+    def _save_components(self, outdir: Path, comps: np.ndarray):
+        # Save stack as a multi-page TIFF
+        tpath = outdir / "components.tif"
+        tifffile.imwrite(str(tpath), comps.astype(np.float32), imagej=True)
+
+        # Save per-component PNGs with dye names if available
+        for j in range(comps.shape[0]):
+            name = None
+            try:
+                name = pipeline.DYE_LIST[j]
+            except Exception:
+                name = f"component_{j+1}"
+            png = _to_uint8(comps[j])
+            tifffile.imwrite(str(outdir / f"{j+1:02d}_{name}.png"), png)
+
+    def _save_spectral_rgb(self, outdir: Path, rgb: np.ndarray):
+        # Normalize robustly then save PNG
+        norm = rgb / max(np.percentile(rgb, 99.5), 1e-6)
+        norm = np.clip(norm, 0, 1)
+        png = (norm * 255).astype(np.uint8)
+        tifffile.imwrite(str(outdir / "spectral_rgb.png"), png)
+
+    def _save_phasor_plot(self, outdir: Path, g: np.ndarray, s: np.ndarray, tag="phasor"):
+        fig = plt.figure()
+        ax = fig.add_subplot(111)
+        ax.hist2d(g.ravel(), (-s).ravel(), bins=100, range=[[-1, 1], [-1, 1]], cmap='nipy_spectral')
+        circ = plt.Circle((0, 0), 1, fill=False, color='white')
+        ax.add_patch(circ)
+        ax.set_aspect('equal', adjustable='box')
+        ax.set_xlim([-1, 1]); ax.set_ylim([-1, 1])
+        ax.set_title('Phasor Plot')
+        fig.savefig(outdir / f"{tag}.png", dpi=200, bbox_inches='tight')
+        plt.close(fig)
+
     def _on_run(self):
         # Remove old selector if any
         if self.selector:
@@ -117,14 +180,18 @@ class PhasorGUI(QMainWindow):
 
         # Prepare intensity and filtered data
         self.int_img = np.sum(self.channels, axis=0)
-        filt = wiener(self.channels, (1,5,5)) if self.chk_wiener.isChecked() else self.channels
+        filt = wiener(self.channels, (1, 5, 5)) if self.chk_wiener.isChecked() else self.channels
 
-        want_comps   = self.chk_components.isChecked()
-        want_phasor  = self.chk_phasor.isChecked()
-        want_spectral= self.chk_spectral.isChecked()
-        want_select  = self.chk_select.isChecked()
+        want_comps = self.chk_components.isChecked()
+        want_phasor = self.chk_phasor.isChecked()
+        want_spectral = self.chk_spectral.isChecked()
+        want_select = self.chk_select.isChecked()
         if not any([want_comps, want_phasor, want_spectral, want_select]):
             want_comps = True
+
+        # Output dir (and selection counter reset)
+        self.current_outdir = self._prepare_outdir(filepath) if self.chk_autosave.isChecked() else None
+        self.sel_idx = 0
 
         # Compute components if needed
         comps = pipeline.process_file(filepath) if want_comps else None
@@ -145,37 +212,48 @@ class PhasorGUI(QMainWindow):
         # Row 0: primary views
         ax_flat = axes[0]
         ax_idx = 0
+
         # Components
         if want_comps:
             for j in range(comps.shape[0]):
-                if ax_idx >= cols: break
+                if ax_idx >= cols:
+                    break
                 ax = ax_flat[ax_idx]
                 v99 = np.percentile(comps[j], 99)
                 ax.imshow(comps[j], vmax=v99, cmap='gray')
-                ax.set_title(pipeline.DYE_LIST[j])
+                try:
+                    title = pipeline.DYE_LIST[j]
+                except Exception:
+                    title = f"Component {j+1}"
+                ax.set_title(title)
                 ax.axis('off')
                 ax_idx += 1
+
         # Phasor
+        g = s = None
         if want_phasor and ax_idx < cols:
             ax = ax_flat[ax_idx]
             g, s = pipeline.phasor_transform(filt, n_harm=self.spin_harm.value(), axis=0)
-            ax.hist2d(g.ravel(), (-s).ravel(), bins=100, range=[[-1,1],[-1,1]], cmap='nipy_spectral')
+            ax.hist2d(g.ravel(), (-s).ravel(), bins=100, range=[[-1, 1], [-1, 1]], cmap='nipy_spectral')
             ax.set_title('Phasor Plot')
             ax.axis('off')
             ax.add_patch(plt.Circle((0, 0), 1, fill=False, color='white'))
             ax.set_box_aspect(1)
             ax_idx += 1
+
         # Spectral
+        rgb = None
         if want_spectral and ax_idx < cols:
             ax = ax_flat[ax_idx]
             rgb = pipeline.SpectralStack2RGB(self.channels, pipeline.channel_lambdas)
-            ax.imshow(rgb/np.percentile(rgb,99.5))
+            ax.imshow(np.clip(rgb / max(np.percentile(rgb, 99.5), 1e-6), 0, 1))
             ax.set_title('Spectral RGB')
             ax.axis('off')
             ax_idx += 1
+
         # Hide unused
         for k in range(ax_idx, cols):
-            axes[0,k].set_visible(False)
+            axes[0, k].set_visible(False)
 
         # Row 1: interactive if requested
         if want_select:
@@ -202,53 +280,116 @@ class PhasorGUI(QMainWindow):
         fig.tight_layout()
         self.canvas.draw_idle()
 
+        # === Auto-save outputs (non-interactive) ===
+        if self.current_outdir is not None:
+            # Save the full overview
+            self._save_overview(self.current_outdir, tag="overview")
+
+            # Save components
+            if want_comps and comps is not None:
+                self._save_components(self.current_outdir, comps)
+
+            # Save spectral RGB
+            if want_spectral and rgb is not None:
+                self._save_spectral_rgb(self.current_outdir, rgb)
+
+            # Save phasor
+            if want_phasor and g is not None and s is not None:
+                self._save_phasor_plot(self.current_outdir, g, s, tag="phasor")
+
+            # Save intensity sum
+            tifffile.imwrite(str(self.current_outdir / "intensity_sum.png"), _to_uint8(self.int_img))
+
+            # Also save raw multi-channel stack as TIFF (32ch or full)
+            try:
+                tifffile.imwrite(str(self.current_outdir / "raw_channels.tif"),
+                                 self.channels.astype(np.float32), imagej=True)
+            except Exception:
+                pass
+
     def _on_select_region(self, eclick, erelease):
+        if eclick.xdata is None or erelease.xdata is None:
+            return  # clicked outside axes
+
         # Coordinates
         x1, x2 = sorted([int(eclick.xdata), int(erelease.xdata)])
         y1, y2 = sorted([int(eclick.ydata), int(erelease.ydata)])
+        if (y2 - y1) <= 0 or (x2 - x1) <= 0:
+            return
+
         sel = self.channels[:, y1:y2, x1:x2]
 
         # Phasor of selection
         g_sel, s_sel = pipeline.phasor_transform(sel, n_harm=self.spin_harm.value(), axis=0)
-        mask = self.int_img[y1:y2, x1:x2] > np.mean(self.int_img[y1:y2, x1:x2])
+
+        # Intensity mask (above-mean within selection)
+        sel_int = self.int_img[y1:y2, x1:x2]
+        mask = sel_int > np.mean(sel_int)
+
         if mask.shape == g_sel.shape[1:]:
-            c = g_sel[:, mask].ravel()
+            g_vals = g_sel[:, mask].ravel()
             s_vals = -s_sel[:, mask].ravel()
         else:
-            g_vals = g_sel.ravel(); s_vals = -s_sel.ravel()
+            g_vals = g_sel.ravel()
+            s_vals = (-s_sel).ravel()
 
-        g_corr = pd.DataFrame(g_vals)
-        s_corr = pd.DataFrame(s_vals)
+        g_corr = pd.DataFrame(g_vals, columns=["G"])
+        s_corr = pd.DataFrame(s_vals, columns=["S"])
 
         # Update phasor plot
         ax2 = self.ax_phasor_sel
         ax2.clear()
-        ax2.hist2d(g_vals, s_vals, bins=100, range=[[-1,1],[-1,1]], cmap='nipy_spectral')
-        ax2.add_patch(plt.Circle((0,0),1, fill=False, color='white'))
+        ax2.hist2d(g_vals, s_vals, bins=100, range=[[-1, 1], [-1, 1]], cmap='nipy_spectral')
+        ax2.add_patch(plt.Circle((0, 0), 1, fill=False, color='white'))
         ax2.set_box_aspect(1)
+        ax2.set_xlim([-1, 1]); ax2.set_ylim([-1, 1])
 
-        # Update sum plot
+        # Update sum plot (per-channel sum in the selection)
         ax3 = self.ax_sum_sel
         ax3.clear()
-        sum_vals = sel.sum(axis=(1,2))
+        sum_vals = sel.sum(axis=(1, 2))
         ax3.plot(sum_vals, marker='o')
-        print(f'Spectral Data: {sum_vals}')
-        sum_vals = pd.DataFrame(sum_vals)
-        sum_vals.to_csv('sum_vals.csv')
 
-        print(f'Phasor Data G: {g_corr}')
-        g_corr.to_csv('G_coordinate.csv', index=False)
-        print(f'Phasor Data S: {s_corr}')
-        s_corr.to_csv('S_coordinate.csv')
+        # CSV outputs always saved, but now respect output dir
+        if self.current_outdir is not None:
+            # Increment selection index
+            self.sel_idx += 1
+            sel_tag = f"selection_{self.sel_idx:02d}"
 
+            # Save CSVs
+            pd.DataFrame(sum_vals, columns=["sum"]).to_csv(self.current_outdir / f"{sel_tag}_sum_vals.csv", index=False)
+            g_corr.to_csv(self.current_outdir / f"{sel_tag}_G_coordinate.csv", index=False)
+            s_corr.to_csv(self.current_outdir / f"{sel_tag}_S_coordinate.csv", index=False)
 
+            # Save selection plots
+            # 1) Selected region phasor
+            self._save_phasor_plot(self.current_outdir, g_sel, s_sel, tag=f"{sel_tag}_phasor")
 
+            # 2) Selected sum plot
+            fig_sum = plt.figure()
+            axp = fig_sum.add_subplot(111)
+            axp.plot(sum_vals, marker='o')
+            axp.set_xlabel('Channel'); axp.set_ylabel('Sum (a.u.)')
+            axp.set_title('Selected Region Sum per Channel')
+            fig_sum.savefig(self.current_outdir / f"{sel_tag}_sum_plot.png", dpi=200, bbox_inches='tight')
+            plt.close(fig_sum)
+
+            # 3) Save selected crop as 32ch TIFF (if present)
+            try:
+                tifffile.imwrite(str(self.current_outdir / f"{sel_tag}_crop.tif"),
+                                 sel.astype(np.float32), imagej=True)
+            except Exception:
+                pass
+
+            # 4) Save a PNG of the selected region (intensity)
+            png_crop = _to_uint8(sel.sum(axis=0))
+            tifffile.imwrite(str(self.current_outdir / f"{sel_tag}_intensity.png"), png_crop)
 
         self.canvas.draw_idle()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     win = PhasorGUI()
     win.show()
     sys.exit(app.exec_())
-
